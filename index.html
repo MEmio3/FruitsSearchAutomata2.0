@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>🍑 Fruit Search Bot</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <link rel="stylesheet" href="style.css"/>
+</head>
+<body>
+  <header class="topbar">
+    <h1>🍑 Fruit Search Bot</h1>
+    <div class="top-sub">Automate human-like searches across browsers and profiles</div>
+  </header>
+
+  <main class="grid">
+    <!-- Left: Fruit List -->
+    <section class="card fruit-card">
+      <div class="card-title">
+        <span>🍑 Fruit List</span>
+        <span class="count-badge"><span id="fruitCount">0</span></span>
+      </div>
+      <textarea id="fruitList" placeholder="One query per line"></textarea>
+
+      <div class="actions">
+        <button class="btn" id="loadBtn" onclick="loadFruits()">📂 Load</button>
+        <button class="btn" id="saveBtn" onclick="saveFruits()">💾 Save</button>
+      </div>
+    </section>
+
+    <!-- Right: Settings -->
+    <section class="card settings-card">
+      <div class="card-title">⚙️ Settings</div>
+
+      <div class="control-group">
+        <label class="control-label">Delay (seconds)</label>
+        <input id="delayInput" type="number" class="glass-input" value="3" min="0.5" step="0.5"/>
+      </div>
+
+      <div class="control-group">
+        <label class="control-label">PC Searches (per profile)</label>
+        <input id="pcCountInput" type="number" class="glass-input" value="1" min="1"/>
+      </div>
+
+      <div class="control-group">
+        <label class="control-label">Mobile Searches (per eligible profile)</label>
+        <input id="mobileCountInput" type="number" class="glass-input" value="20" min="1"/>
+      </div>
+
+      <div class="control-group">
+        <label class="control-label">Mobile searches</label>
+        <label class="switch">
+          <input id="mobileToggle" type="checkbox"/>
+          <span class="slider"></span>
+        </label>
+        <div class="muted small">Enable mobile pass (eligible profiles only - Level 2)</div>
+      </div>
+
+      <!-- 🤖 AI Generator panel -->
+      <div class="control-group" id="aiGenPanel">
+        <label class="control-label">🤖 AI Generator — Topic / seed</label>
+        <input id="aiPromptInput" type="text" class="glass-input"
+               placeholder="e.g., Valorant tips 2025, aim training, crosshair settings">
+
+        <div class="row">
+          <div class="col">
+            <label class="control-label">Count</label>
+            <input id="aiCountInput" type="number" class="glass-input" min="1" max="200" value="30">
+          </div>
+          <div class="col-end">
+            <button id="aiGenerateBtn" class="btn btn-primary" type="button"
+                    onclick="aiGenerateFromPanel()">✨ Generate &amp; Fill</button>
+          </div>
+        </div>
+
+        <div class="muted small">
+          Uses your server’s AI generator; saves to <code>fruits.json</code> and fills the Fruit List.
+        </div>
+      </div>
+
+      <div class="control-group">
+        <label class="control-label">Browser</label>
+        <select id="browserSelect" class="glass-input" onchange="onBrowserChange()">
+          <option value="edge">Edge</option>
+          <option value="chrome">Chrome</option>
+        </select>
+        <div id="browserProfileLabel" class="muted small">Edge</div>
+      </div>
+
+      <div class="control-group">
+        <div class="muted" id="profileInfo">Looking for profiles…</div>
+        <div class="btn-row">
+          <button class="btn" onclick="openProfileModal()">👤 Select Profiles</button>
+          <button class="btn" id="refreshPointsBtn" onclick="refreshPointsClick()">🔄 Refresh Points</button>
+        </div>
+        <div id="selectedProfilesDisplay" class="muted">No profiles selected</div>
+      </div>
+
+      <div class="btn-row">
+        <button class="btn btn-primary" id="startBtn" onclick="startAutomation()">▶ START SEARCH</button>
+        <button class="btn" id="pauseBtn"  onclick="pauseAutomation()" disabled>⏸ PAUSE</button>
+        <button class="btn" id="resumeBtn" onclick="resumeAutomation()" disabled>⏯ RESUME</button>
+        <button class="btn btn-danger" id="stopBtn"   onclick="stopAutomation()" disabled>⏹ STOP</button>
+      </div>
+    </section>
+
+    <!-- Status -->
+    <section class="card status-panel">
+      <div class="card-title">📊 Status</div>
+      <div class="status-row">
+        <div id="statusIndicator" class="dot"></div>
+        <div id="statusMessage" class="status-text">Idle</div>
+      </div>
+      <div class="status-sub">
+        <span id="currentSearch"></span>
+      </div>
+      <div class="progress">
+        <div id="progressBar" class="bar"></div>
+      </div>
+      <div class="progress-text"><span id="progressText">0%</span></div>
+
+      <!-- profile board will be injected here -->
+    </section>
+  </main>
+
+  <!-- Profile Modal -->
+  <div id="profileModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-head">
+        <div class="title">Select Profiles (<span id="modalBrowserName">Edge</span>)</div>
+        <button class="btn ghost" onclick="closeProfileModal()">✖</button>
+      </div>
+
+      <div id="modalInfo" class="muted">Pick profiles and choose Level.</div>
+
+      <div id="profileList" class="profile-list"></div>
+
+      <div class="modal-actions">
+        <button class="btn" onclick="selectAllProfiles()">Select All</button>
+        <button class="btn" onclick="clearAllProfiles()">Clear</button>
+        <button class="btn btn-primary" onclick="applyProfileSelection()">Apply</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>

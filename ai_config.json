@@ -1,0 +1,11 @@
+{
+  "provider": "auto",
+  "gemini": {
+    "api_key": "AIzaSyA4zrBSNby6Fg9cNeGZ9WX_GaNwgzzoMNA",
+    "model": "gemini-1.5-flash"
+  },
+  "openai": {
+    "api_key": "",
+    "model": "gpt-4o-mini"
+  }
+}
