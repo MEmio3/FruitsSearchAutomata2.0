@@ -24,12 +24,8 @@ try:
 except Exception:
     pass
 
-# Playwright (optional, used for mobile)
-try:
-    from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout  # type: ignore
-    _HAVE_PLAYWRIGHT = True
-except Exception:
-    _HAVE_PLAYWRIGHT = False
+# Playwright is DISABLED by request (mobile handled via DevTools device mode)
+_HAVE_PLAYWRIGHT = False
 
 # ---------------- Configuration ----------------
 PROFILE_INFO_FILE = "profile_info.json"
@@ -37,18 +33,33 @@ AI_CONFIG_FILE    = "ai_config.json"  # where the Web UI-saved API keys live (se
 
 # Mobile search config (env-overridable)
 MOBILE_SEARCH_COUNT = int(os.getenv("MOBILE_SEARCH_COUNT", "20"))
-MOBILE_DEVICE   = os.getenv("MOBILE_DEVICE", "Pixel 7")
+MOBILE_DEVICE   = os.getenv("MOBILE_DEVICE", "Pixel 7")  # informational only (no Playwright path)
 MOBILE_TIMEZONE = os.getenv("MOBILE_TIMEZONE", "Asia/Dhaka")
 MOBILE_LOCALE   = os.getenv("MOBILE_LOCALE", "en-US")
-MOBILE_HEADLESS = os.getenv("MOBILE_HEADLESS", "1") == "1"
+MOBILE_HEADLESS = os.getenv("MOBILE_HEADLESS", "1") == "1"  # unused now, kept for compatibility
 
-# Legacy UA window fallback (when Playwright isn't available)
+# UA + window settings for DevTools device mode
 MOBILE_UA = os.getenv(
     "MOBILE_UA",
     "Mozilla/5.0 (Linux; Android 12; Pixel 5) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/118.0.0.0 Mobile Safari/537.36"
 )
+MOBILE_EDGE_UA = os.getenv(
+    "MOBILE_EDGE_UA",
+    "Mozilla/5.0 (Linux; Android 12; Pixel 7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36 EdgA/124.0.2478.50"
+)
 MOBILE_WINDOW_SIZE = os.getenv("MOBILE_WINDOW_SIZE", "390,844")
+MOBILE_VIEWPORT = (390, 844)  # informational only (no Playwright path)
+
+# Human-like scroll dwell (seconds)
+SCROLL_SECONDS = float(os.getenv("SCROLL_SECONDS", "2.0"))
+
+# OS-aware key helpers
+IS_MAC = platform.system() == "Darwin"
+MOD = "command" if IS_MAC else "ctrl"
+SHIFT = "shift"
+OPT = "option" if IS_MAC else "alt"
 
 # ---------------- App + State ----------------
 app = Flask(__name__, static_folder=".", static_url_path="")
@@ -61,11 +72,11 @@ state: Dict[str, Any] = {
     "progress": 0.0,
     "current_search": "",
     "current_profile": "",
-    "completed": 0,      # desktop-only
-    "total": 0,          # desktop-only
+    "completed": 0,      # includes desktop + mobile now
+    "total": 0,          # includes desktop + mobile remaining
     "is_paused": False,
-    "profile_progress": {},     # { profile: {done,total} } for desktop
-    "profile_points": {},       # UI compat
+    "profile_progress": {},     # { profile: {done,total} } desktop only
+    "profile_points": {},
     "profile_eligibility": {},  # { profile: {mobile:bool,reason} }
     "mobile_enabled": False,
     "mobile_progress": {},      # { profile: {done,total} }
@@ -87,9 +98,6 @@ def _load_json(path: str) -> dict:
         return {}
 
 def _write_secure_json(path: str, data: dict):
-    """
-    Save JSON with restrictive permissions (600) on POSIX. On Windows we still write normally.
-    """
     p = Path(path)
     tmp = p.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -113,16 +121,24 @@ def get_or_init_profile(info: Dict[str, dict], profile: str) -> dict:
     today = _today_str()
     entry = info.get(profile, {})
     level = int(entry.get("level", 1))
-    date = entry.get("date")
+    date  = entry.get("date")
     error = entry.get("error")
+
+    # Reset counts on new day, preserve level
     if date != today:
-        entry = {"date": today, "level": 2 if level == 2 else 1,
-                 "totalSearchPC": 0, "totalSearchMobile": 0, "error": error}
+        entry = {
+            "date": today,
+            "level": 2 if level == 2 else 1,
+            "totalSearchPC": 0,
+            "totalSearchMobile": 0,
+            "error": error
+        }
     else:
         entry.setdefault("totalSearchPC", int(entry.get("totalSearchPC", 0)))
         entry.setdefault("totalSearchMobile", int(entry.get("totalSearchMobile", 0)))
         entry["level"] = 2 if level == 2 else 1
-        entry["date"] = today
+        entry["date"]  = today
+
     info[profile] = entry
     return entry
 
@@ -251,21 +267,23 @@ def launch_browser(browser: str, profile_dir: Optional[str] = None) -> Optional[
     return None
 
 def launch_mobile_browser(browser: str, profile_dir: Optional[str] = None) -> Optional[subprocess.Popen]:
-    """Fallback: desktop browser window with mobile UA + size."""
+    """Launch Edge/Chrome with mobile UA + size + DevTools auto-open, for DevTools device mode."""
     system = platform.system()
     size_flag = f"--window-size={MOBILE_WINDOW_SIZE}"
-    ua_flag   = f"--user-agent={MOBILE_UA}"
+    ua_val    = MOBILE_EDGE_UA if browser == "edge" else MOBILE_UA
+    ua_flag   = f"--user-agent={ua_val}"
+    devtools_flag = "--auto-open-devtools-for-tabs"
     try:
         if system == "Windows":
             if browser == "chrome":
                 cmd = ["start", "chrome"]
                 if profile_dir: cmd += [f"--profile-directory={profile_dir}"]
-                cmd += [ua_flag, size_flag]
+                cmd += [ua_flag, size_flag, devtools_flag, "--new-window"]
                 return subprocess.Popen(cmd, shell=True)
             if browser == "edge":
                 cmd = ["start", "msedge"]
                 if profile_dir: cmd += [f"--profile-directory={profile_dir}"]
-                cmd += [ua_flag, size_flag]
+                cmd += [ua_flag, size_flag, devtools_flag, "--new-window"]
                 return subprocess.Popen(cmd, shell=True)
         elif system == "Darwin":
             app_map = {"chrome": "Google Chrome", "edge": "Microsoft Edge"}
@@ -273,7 +291,7 @@ def launch_mobile_browser(browser: str, profile_dir: Optional[str] = None) -> Op
             if app:
                 args = ["open", "-a", app, "--args"]
                 if profile_dir: args += [f"--profile-directory={profile_dir}"]
-                args += [ua_flag, size_flag]
+                args += [ua_flag, size_flag, devtools_flag, "--new-window"]
                 return subprocess.Popen(args)
         else:
             if browser == "chrome":
@@ -281,7 +299,7 @@ def launch_mobile_browser(browser: str, profile_dir: Optional[str] = None) -> Op
                     try:
                         cmd = [c]
                         if profile_dir: cmd += [f"--profile-directory={profile_dir}"]
-                        cmd += [ua_flag, size_flag]
+                        cmd += [ua_flag, size_flag, devtools_flag, "--new-window"]
                         return subprocess.Popen(cmd)
                     except FileNotFoundError:
                         pass
@@ -290,7 +308,7 @@ def launch_mobile_browser(browser: str, profile_dir: Optional[str] = None) -> Op
                     try:
                         cmd = [c]
                         if profile_dir: cmd += [f"--profile-directory={profile_dir}"]
-                        cmd += [ua_flag, size_flag]
+                        cmd += [ua_flag, size_flag, devtools_flag, "--new-window"]
                         return subprocess.Popen(cmd)
                     except FileNotFoundError:
                         pass
@@ -329,7 +347,7 @@ def sleep_with_pause(seconds: float):
 
 # ---------------- Query helpers ----------------
 def _build_queries(base: List[str], count: int) -> List[str]:
-    if not base:
+    if not base or count <= 0:
         return []
     out, i = [], 0
     while len(out) < count:
@@ -337,108 +355,61 @@ def _build_queries(base: List[str], count: int) -> List[str]:
         i += 1
     return out[:count]
 
-# ---------------- Playwright Mobile ----------------
-class MobileSearcher:
-    def __init__(self, profile: str, device_name: str = MOBILE_DEVICE, headless: bool = MOBILE_HEADLESS):
-        self.profile = profile
-        self.device_name = device_name
-        self.headless = headless
-        self._p = self._browser = self._context = None
-        self.page = None
-        self.storage_path = Path("sessions_mobile") / f"{profile}.json"
-        if not self.storage_path.parent.exists():
-            self.storage_path.parent.mkdir(parents=True, exist_ok=True)
-    def __enter__(self):
-        if not _HAVE_PLAYWRIGHT:
-            raise RuntimeError("Playwright not available")
-        self._p = sync_playwright().start()
-        device = self._p.devices.get(self.device_name) or self._p.devices["Pixel 5"]
-        self._browser = self._p.chromium.launch(headless=self.headless)
-        self._context = self._browser.new_context(
-            **device,
-            locale=MOBILE_LOCALE,
-            timezone_id=MOBILE_TIMEZONE,
-            storage_state=str(self.storage_path) if self.storage_path.exists() else None
-        )
-        self.page = self._context.new_page()
-        return self
-    def __exit__(self, exc_type, exc, tb):
-        try:
-            if self._context:
-                try:
-                    self._context.storage_state(path=str(self.storage_path))
-                except:
-                    pass
-        finally:
-            try: self._context and self._context.close()
-            except: pass
-            try: self._browser and self._browser.close()
-            except: pass
-            try: self._p and self._p.stop()
-            except: pass
-    def _j(self,a,b): time.sleep(random.uniform(a,b))
-    def _box(self)->str:
-        sels = [
-            "input[name='q']", "input[type='search']", "form[role='search'] input",
-            "[aria-label='Enter your search term']", "[aria-label='Search'] input, [aria-label='Search']",
-            "input#sb_form_q"
-        ]
-        for s in sels:
-            if self.page.locator(s).first.count():
-                return s
-        return sels[0]
-    def _type(self, sel: str, text: str):
-        box = self.page.locator(sel).first
-        box.click()
-        typed=[]
-        for ch in text:
-            if typed and random.random()<0.06:
-                self.page.keyboard.press("Backspace"); typed.pop(); time.sleep(random.uniform(0.04,0.12))
-            self.page.keyboard.type(ch, delay=random.uniform(35,120)); typed.append(ch)
-            if random.random()<0.07: time.sleep(random.uniform(0.08,0.25))
-        time.sleep(random.uniform(0.15,0.6))
-    def _scroll(self, a=2, b=6):
-        for _ in range(random.randint(a,b)):
-            self.page.evaluate(f"window.scrollBy(0, {random.randint(200,800)});")
-            time.sleep(random.uniform(0.5,1.6))
-        if random.random()<0.3:
-            self.page.evaluate("window.scrollBy(0, -300);")
-            time.sleep(random.uniform(0.4,1.0))
-    def _maybe_click(self, prob=0.4, dwell_min=5, dwell_max=18):
-        if random.random()>prob:
-            return
-        cands = self.page.locator("li.b_algo h2 a, li[data-h*='b_algo'] h2 a, .b_algo h2 a, #b_results a").all()
-        if not cands:
-            return
-        link = random.choice(cands[:min(len(cands),6)])
-        try:
-            with self.page.expect_navigation(timeout=15000):
-                link.click()
-            self._j(dwell_min, dwell_max); self._scroll(1,3)
-            if random.random()<0.25:
-                anchors = self.page.locator("a[href]").all()
-                if anchors:
-                    random.choice(anchors[:min(len(anchors),8)]).click(timeout=5000)
-                    self._j(3,10); self._scroll(1,3)
-            if random.random()<0.8:
-                self.page.go_back(timeout=15000); self._j(1.2,3.0)
-        except PWTimeout:
-            pass
-    def search(self, query: str, click_probability: float = 0.4):
-        self.page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=30000)
-        self._j(0.6,1.6)
-        for sel in ["button#bnp_btn_accept","button[aria-label*='Accept']","text=I agree","text=Accept all","text=Accept"]:
-            try:
-                if self.page.locator(sel).first.is_visible():
-                    self.page.locator(sel).first.click(timeout=1500)
-                    break
-            except:
-                pass
-        box = self._box()
-        self._type(box, query)
-        self.page.keyboard.press("Enter")
-        self.page.wait_for_selector("#b_results, .b_algo, [aria-label*='Results']", timeout=15000)
-        self._j(1.0,2.2); self._scroll(2,6); self._maybe_click(click_probability)
+# ---------------- DevTools device mode helpers (NO Playwright) ---------------
+def _open_devtools():
+    # Use standard shortcuts rather than F12 (more reliable across OSes)
+    try:
+        if IS_MAC:
+            pyautogui.hotkey("command", "option", "i")
+        else:
+            pyautogui.hotkey("ctrl", "shift", "i")
+        time.sleep(0.7)
+    except Exception as e:
+        print("DevTools open error:", e)
+
+def _toggle_device_toolbar():
+    try:
+        if IS_MAC:
+            pyautogui.hotkey("command", "shift", "m")
+        else:
+            pyautogui.hotkey("ctrl", "shift", "m")
+        time.sleep(0.5)
+    except Exception as e:
+        print("Device toolbar toggle error:", e)
+
+def _focus_address_bar():
+    # Single-tab flow: overwrite the URL each time
+    try:
+        if IS_MAC:
+            pyautogui.hotkey("command", "l")
+        else:
+            pyautogui.hotkey("ctrl", "l")
+    except Exception as e:
+        print("Address bar focus error:", e)
+
+def _type_and_go(text: str, per_char: float = 0.05):
+    try:
+        pyautogui.typewrite(text, interval=per_char)
+        time.sleep(0.2)
+        pyautogui.press("enter")
+    except Exception as e:
+        print("Typing error:", e)
+
+def desktop_scroll_human_2s(seconds: float = SCROLL_SECONDS):
+    """Human-like ~2s scroll using PageDown/Down with small pauses and a tiny chance of a PageUp."""
+    try:
+        end = time.time() + max(0.5, seconds)
+        while time.time() < end:
+            if random.random() < 0.70:
+                pyautogui.press("pagedown")
+            else:
+                pyautogui.press("down")
+            time.sleep(random.uniform(0.12, 0.30))
+        if random.random() < 0.30:
+            pyautogui.press("pageup")
+            time.sleep(random.uniform(0.08, 0.20))
+    except Exception as e:
+        print("desktop scroll error:", e)
 
 # ---------------- Worker ----------------
 def automation_worker(fruits: List[str], delay: float, browser: str, profiles: List[Dict[str, str]]):
@@ -460,166 +431,132 @@ def automation_worker(fruits: List[str], delay: float, browser: str, profiles: L
             name = profile["name"]
             directory = profile.get("directory")
 
-            # Desktop pass
+            # ----- MOBILE FIRST: REMAINING for this profile -----
             with state_lock:
                 state["current_profile"] = name
-                state["status"] = f"Opening {browser} for profile: {name}"
-                pp = state.get("profile_progress", {})
-                desktop_total = pp.get(name, {}).get("total", len(fruits))
-
-            proc = launch_browser(browser, directory)
-            if proc:
-                browser_processes.append((proc, name))
-            sleep_with_pause(3)
-
-            queries = _build_queries(fruits, desktop_total)
-            for q in queries:
-                _wait_if_paused()
-                with state_lock:
-                    running = state["is_running"]
-                if not running:
-                    break
-
-                with state_lock:
-                    state["current_search"] = q
-                    state["status"] = f"Searching for: {q}"
-
-                try:
-                    pyautogui.hotkey("ctrl","t"); sleep_with_pause(0.5)
-                    pyautogui.hotkey("ctrl","l"); sleep_with_pause(0.3)
-                    pyautogui.typewrite(q, interval=0.05); sleep_with_pause(0.2)
-                    pyautogui.press("enter")
-                except Exception as e:
-                    print("pyautogui error:", e)
-
-                completed += 1
-                with state_lock:
-                    state["completed"] = completed
-                    total = max(1, state.get("total", 1))
-                    state["progress"] = (completed / total) * 100.0
-                    pp = state.get("profile_progress", {})
-                    if name in pp:
-                        pp[name]["done"] = min(pp[name]["done"] + 1, pp[name]["total"])
-
-                try:
-                    bump_profile_progress(name, is_pc=True, delta=1)
-                except:
-                    pass
-
-                sleep_with_pause(max(0.1, delay + random.uniform(0.15, 0.6)))
-
-            completed_profiles.append(name)
-
-            # Keep windows manageable
-            if len(completed_profiles) > MAX_ACTIVE_BROWSERS:
-                try:
-                    close_browser_windows(browser)
-                    if browser_processes:
-                        oldest_process, _ = browser_processes.pop(0)
-                        try:
-                            oldest_process.terminate(); sleep_with_pause(0.5)
-                            if oldest_process.poll() is None:
-                                oldest_process.kill()
-                        except:
-                            pass
-                    completed_profiles.pop(0)
-                    sleep_with_pause(2)
-                    with state_lock:
-                        state["status"] = f"Freed memory, continuing with {name}"
-                except Exception as e:
-                    print("Memory mgmt error:", e)
-
-            # Mobile pass (Playwright preferred)
-            with state_lock:
                 elig = state.get("profile_eligibility", {}).get(name, {})
                 mobile_enabled = bool(state.get("mobile_enabled", False))
-                mprog = state.setdefault("mobile_progress", {})
-                cur = mprog.get(name)
+                mobile_remaining = int(state.get("mobile_progress", {}).get(name, {}).get("total", 0))
 
-            mobile_ok = mobile_enabled and bool(elig.get("mobile")) and MOBILE_SEARCH_COUNT > 0
-            if not mobile_ok:
-                continue
+            mobile_ok = mobile_enabled and bool(elig.get("mobile")) and mobile_remaining > 0
+            if mobile_ok:
+                mqueries = _build_queries(fruits, mobile_remaining) or \
+                           ["weather today", "top news", "sports scores", "nearby restaurants", "time now"]
 
-            with state_lock:
-                if cur is None:
-                    state["mobile_progress"][name] = {"done": 0, "total": MOBILE_SEARCH_COUNT}
+                with state_lock:
+                    state["status"] = f"Opening {browser} (DevTools device mode) for: {name}"
+                mproc = launch_mobile_browser(browser, directory)
+                if mproc:
+                    browser_processes.append((mproc, f"{name} (mobile)"))
+                sleep_with_pause(3)
 
-            mqueries = _build_queries(fruits, MOBILE_SEARCH_COUNT) or \
-                       ["weather today", "top news", "sports scores", "nearby restaurants", "time now"]
+                # switch DevTools → Device toolbar ("phone" view) once, then reuse ONE tab
+                _open_devtools()
+                _toggle_device_toolbar()
+                sleep_with_pause(0.6)
 
-            if _HAVE_PLAYWRIGHT:
-                try:
+                for mq in mqueries:
+                    _wait_if_paused()
                     with state_lock:
-                        state["status"] = f"Opening Playwright mobile for: {name}"
-                    with MobileSearcher(profile=name) as mobile:
-                        for mq in mqueries:
-                            _wait_if_paused()
-                            with state_lock:
-                                running = state["is_running"]
-                            if not running:
-                                break
+                        if not state["is_running"]:
+                            break
+                        state["current_search"] = f"{mq} [m]"
+                        state["status"] = f"Mobile searching: {mq}"
 
-                            with state_lock:
-                                state["current_search"] = f"{mq} [m]"
-                                state["status"] = f"Mobile searching: {mq}"
+                    ok = False
+                    try:
+                        # Always reuse the same tab: focus omnibox, type, go
+                        _focus_address_bar(); sleep_with_pause(0.25)
+                        _type_and_go(mq, per_char=0.05); sleep_with_pause(0.8)
+                        desktop_scroll_human_2s(SCROLL_SECONDS)
+                        ok = True
+                    except Exception as e:
+                        print("pyautogui error (mobile devtools mode):", e)
 
+                    if ok:
+                        with state_lock:
+                            mp = state.setdefault("mobile_progress", {}).setdefault(
+                                name, {"done": 0, "total": mobile_remaining}
+                            )
+                            if mp["done"] < mp["total"]:
+                                mp["done"] += 1
+                            completed += 1
+                            total = max(1, int(state.get("total", 1)))
+                            state["completed"] = completed
+                            state["progress"] = (completed / total) * 100.0
+                        try: bump_profile_progress(name, is_pc=False, delta=1)
+                        except: pass
+                    sleep_with_pause(max(0.1, delay + random.uniform(0.15, 0.6)))
+
+            # ----- DESKTOP (runs after mobile) -----
+            with state_lock:
+                pp = state.get("profile_progress", {})
+                desktop_remaining = int(pp.get(name, {}).get("total", 0))
+
+            if desktop_remaining > 0:
+                with state_lock:
+                    state["status"] = f"Opening {browser} for profile: {name} (desktop)"
+                proc = launch_browser(browser, directory)
+                if proc:
+                    browser_processes.append((proc, name))
+                sleep_with_pause(3)
+
+                queries = _build_queries(fruits, desktop_remaining)
+                for q in queries:
+                    _wait_if_paused()
+                    with state_lock:
+                        running = state["is_running"]
+                    if not running:
+                        break
+
+                    with state_lock:
+                        state["current_search"] = q
+                        state["status"] = f"Searching (desktop): {q}"
+
+                    try:
+                        pyautogui.hotkey(MOD, "t"); sleep_with_pause(0.5)   # new tab
+                        _focus_address_bar(); sleep_with_pause(0.3)
+                        _type_and_go(q, per_char=0.05); sleep_with_pause(0.8)
+                        desktop_scroll_human_2s(SCROLL_SECONDS)
+                    except Exception as e:
+                        print("pyautogui error:", e)
+
+                    completed += 1
+                    with state_lock:
+                        state["completed"] = completed
+                        total = max(1, int(state.get("total", 1)))
+                        state["progress"] = (completed / total) * 100.0
+                        pp = state.get("profile_progress", {})
+                        if name in pp:
+                            pp[name]["done"] = min(pp[name]["done"] + 1, pp[name]["total"])
+
+                    try:
+                        bump_profile_progress(name, is_pc=True, delta=1)
+                    except:
+                        pass
+
+                    sleep_with_pause(max(0.1, delay + random.uniform(0.15, 0.6)))
+
+                completed_profiles.append(name)
+
+                # Keep windows manageable
+                if len(completed_profiles) > MAX_ACTIVE_BROWSERS:
+                    try:
+                        close_browser_windows(browser)
+                        if browser_processes:
+                            oldest_process, _ = browser_processes.pop(0)
                             try:
-                                mobile.search(mq, click_probability=0.4)
-                            except Exception as e:
-                                print("Playwright mobile error:", e)
-
-                            with state_lock:
-                                mp = state.setdefault("mobile_progress", {}).setdefault(
-                                    name, {"done": 0, "total": MOBILE_SEARCH_COUNT}
-                                )
-                                mp["done"] = min(mp["done"] + 1, mp["total"])
-                            try:
-                                bump_profile_progress(name, is_pc=False, delta=1)
+                                oldest_process.terminate(); sleep_with_pause(0.5)
+                                if oldest_process.poll() is None:
+                                    oldest_process.kill()
                             except:
                                 pass
-                            sleep_with_pause(max(0.1, delay + random.uniform(0.3, 0.9)))
-                except Exception as e:
-                    print("Playwright init/runtime failed, fallback:", e)
-                else:
-                    continue  # finished mobile via PW
-
-            # Fallback: mobile UA window
-            with state_lock:
-                state["status"] = f"Opening {browser} (mobile UA) for profile: {name}"
-            mproc = launch_mobile_browser(browser, directory)
-            if mproc:
-                browser_processes.append((mproc, f"{name} (mobile)"))
-            sleep_with_pause(3)
-
-            for mq in mqueries:
-                _wait_if_paused()
-                with state_lock:
-                    running = state["is_running"]
-                if not running:
-                    break
-
-                with state_lock:
-                    state["current_search"] = f"{mq} [m]"
-                    state["status"] = f"Mobile searching: {mq}"
-
-                try:
-                    pyautogui.hotkey("ctrl","t"); sleep_with_pause(0.5)
-                    pyautogui.hotkey("ctrl","l"); sleep_with_pause(0.3)
-                    pyautogui.typewrite(mq, interval=0.05); sleep_with_pause(0.2)
-                    pyautogui.press("enter")
-                except Exception as e:
-                    print("pyautogui error (mobile fallback):", e)
-
-                with state_lock:
-                    mp = state.setdefault("mobile_progress", {}).setdefault(
-                        name, {"done": 0, "total": MOBILE_SEARCH_COUNT}
-                    )
-                    mp["done"] = min(mp["done"] + 1, mp["total"])
-                try:
-                    bump_profile_progress(name, is_pc=False, delta=1)
-                except:
-                    pass
-                sleep_with_pause(max(0.1, delay + random.uniform(0.15, 0.6)))
+                        completed_profiles.pop(0)
+                        sleep_with_pause(2)
+                        with state_lock:
+                            state["status"] = f"Freed memory, continuing with {name}"
+                    except Exception as e:
+                        print("Memory mgmt error:", e)
 
     except pyautogui.FailSafeException:
         print("Failsafe: mouse moved to top-left. Stopping.")
@@ -728,7 +665,7 @@ def start_automation():
     if delay < 0.5:
         delay = 3.0
 
-    # Resolve profiles
+    # Resolve profiles to use
     profiles: List[Dict[str, Any]] = []
     if browser in ["chrome", "edge"]:
         if req_profiles:
@@ -737,36 +674,53 @@ def start_automation():
         elif selected_profiles_memory.get(browser):
             profiles = selected_profiles_memory[browser]
         elif use_default:
-            profiles = [{"name": "Default", "directory": "Default", "path": "Default"}]
+            # path here is only a label when unknown; (kept for compatibility)
+            profiles = [{"name": "Default", "directory": "Default", "path": str((EdgeProfileManager().user_data_dir or Path()).joinpath("Default"))}]
     if not profiles:
         profiles = [{"name": "Default", "directory": None, "path": None}]
 
-    # Totals by Level
+    # --- Compute REMAINING per profile from profile_info.json (today) ---
     profile_progress: Dict[str, Dict[str, int]] = {}
     profile_points: Dict[str, Dict[str, Any]] = {}
     profile_eligibility: Dict[str, Dict[str, Any]] = {}
     mobile_progress: Dict[str, Dict[str, int]] = {}
-    total_searches = 0
+    total_remaining = 0
 
     info = load_profile_info()
+    today = _today_str()
     for p in profiles:
         name = p.get("name") or p.get("directory") or "Default"
         entry = get_or_init_profile(info, name)
         lvl = int(entry.get("level", 1))
-        desktop_total = 10 if lvl == 1 else 32
+
+        # Targets by level (desktop)
+        desktop_target = 10 if lvl == 1 else 32
+        done_pc = int(entry.get("totalSearchPC", 0))
+        desktop_remaining = max(0, desktop_target - done_pc)
+
+        # Mobile eligibility + remaining
         mobile_ok = (lvl == 2)
-        profile_progress[name] = {"done": 0, "total": desktop_total}
+        done_mobile = int(entry.get("totalSearchMobile", 0))
+        mobile_remaining = max(0, MOBILE_SEARCH_COUNT - done_mobile) if (mobile_enabled and mobile_ok) else 0
+
+        # Save per-profile maps
+        profile_progress[name] = {"done": 0, "total": desktop_remaining}
+        if mobile_remaining > 0:
+            mobile_progress[name] = {"done": 0, "total": mobile_remaining}
+
         profile_points[name] = {"points": None, "level": lvl, "last_updated": int(time.time())}
         profile_eligibility[name] = {"mobile": mobile_ok, "reason": "" if mobile_ok else "level < 2"}
-        total_searches += desktop_total
-        if mobile_enabled and mobile_ok and MOBILE_SEARCH_COUNT > 0:
-            mobile_progress[name] = {"done": 0, "total": MOBILE_SEARCH_COUNT}
+
+        # Global remaining (desktop + mobile)
+        total_remaining += desktop_remaining + mobile_remaining
+
+    # Persist normalized info (it also rolls date counts if needed)
     save_profile_info(info)
 
     with state_lock:
         state.update({
             "is_running": True, "status": "Starting automation...",
-            "progress": 0.0, "completed": 0, "total": total_searches,
+            "progress": 0.0, "completed": 0, "total": total_remaining,
             "is_paused": False, "profile_progress": profile_progress,
             "profile_points": {**state.get("profile_points", {}), **profile_points},
             "profile_eligibility": profile_eligibility,
@@ -787,7 +741,7 @@ def start_automation():
         "message": "Automation started",
         "browser": browser.capitalize(),
         "profiles_in_use": [p["name"] for p in profiles],
-        "total_searches": total_searches,
+        "total_remaining": total_remaining,
         "mobile_enabled": mobile_enabled,
         "mobile_search_count": MOBILE_SEARCH_COUNT,
         "playwright": _HAVE_PLAYWRIGHT
@@ -872,9 +826,6 @@ def _save_ai_config(cfg: dict):
 
 @app.route("/api/ai-config", methods=["GET"])
 def api_get_ai_config():
-    """
-    Returns non-sensitive config only (never returns the API keys).
-    """
     cfg = _load_ai_config()
     has_gemini = bool(os.getenv("GEMINI_API_KEY") or cfg.get("gemini", {}).get("api_key"))
     has_openai = bool(os.getenv("OPENAI_API_KEY") or cfg.get("openai", {}).get("api_key"))
@@ -886,16 +837,6 @@ def api_get_ai_config():
 
 @app.route("/api/ai-config", methods=["POST"])
 def api_set_ai_config():
-    """
-    Body:
-      {
-        "provider": "gemini" | "openai" | "auto",   # optional
-        "vendor": "gemini" | "openai",              # which vendor you're setting
-        "apiKey": "....",                           # optional: saved server-side if present
-        "model": "gemini-2.5-pro",                  # optional
-        "clear": false                               # optional: if true, deletes saved key
-      }
-    """
     data = request.json or {}
     cfg = _load_ai_config()
 
@@ -1020,12 +961,8 @@ def _gemini_generate_queries(seed: str, count: int, api_key: str, model: str) ->
         return _fallback_generate_queries(seed, count)
 
 def _choose_provider_and_generate(prompt: str, count: int, preferred: Optional[str] = None) -> (list, str):
-    """
-    Decide which provider to use (env or saved config), generate, and return (queries, provider_used).
-    """
     cfg = _load_ai_config()
 
-    # Preferred provider from request or config/env
     if preferred not in ("gemini", "openai", "auto", None):
         preferred = None
     provider = (preferred or cfg.get("provider", "auto") or os.getenv("AI_PROVIDER", "auto")).lower()
@@ -1051,11 +988,6 @@ def _choose_provider_and_generate(prompt: str, count: int, preferred: Optional[s
 
 @app.route("/api/ai-generate", methods=["POST"])
 def api_ai_generate():
-    """
-    Body: { "prompt": str, "count": int(1..200), "save": bool, "provider"?: "gemini"|"openai"|"auto" }
-    - If provider omitted, uses configured provider (or auto).
-    - Keys come from env if present, otherwise from ai_config.json saved via /api/ai-config.
-    """
     data = request.json or {}
     prompt   = (data.get("prompt") or "").strip()
     count    = max(1, min(200, int(data.get("count") or 30)))
